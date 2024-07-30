@@ -29,7 +29,7 @@ def get_sqlite_schema(sqlite_conn):
 
 def sqlite_to_mysql_type(sqlite_type):
     type_mapping = {
-        'INTEGER': 'INT ',
+        'INTEGER': 'INT',
         'REAL': 'DOUBLE',
         'TEXT': 'TEXT',
         'BLOB': 'BLOB',
@@ -71,23 +71,30 @@ def convert_create_table_statement(sqlite_statement):
         return f"{column_name} {data_type} {constraints}"
 
     mysql_statement = re.sub(
-        r'(`?\w+`?)\s+(\w+(?:\(\d+\))?)\s*((?:(?:NOT)?\s*NULL|(?:PRIMARY)?\s*KEY|DEFAULT\s*[^,]+)?)', replace_type, mysql_statement, flags=re.IGNORECASE)
+        r'(`?\w+`?)\s+(\w+(?:\(\d+\))?)\s*((?:(?:NOT)?\s*NULL|(?:PRIMARY)?\s*KEY|DEFAULT\s*[^,]+)?)',
+        replace_type, mysql_statement, flags=re.IGNORECASE)
+
+    # Ensure a space before AUTO_INCREMENT if following PRIMARY KEY
+    mysql_statement = re.sub(r'PRIMARY KEY\s*AUTO_INCREMENT',
+                             'PRIMARY KEY AUTO_INCREMENT', mysql_statement, flags=re.IGNORECASE)
 
     # Replace double quotes with backticks
     mysql_statement = mysql_statement.replace('"', '`')
 
-    # Remove foreign key constraints
+    # Extract and remove foreign key constraints
+    foreign_keys = re.findall(
+        r',\s*(FOREIGN KEY\s*\([^)]+\)\s*REFERENCES\s*[^)]+\))', mysql_statement, flags=re.IGNORECASE)
     mysql_statement = re.sub(
-        r',\s*FOREIGN KEY\s*\([^)]+\)\s*REFERENCES\s*[^)]+\)[^)]*', '', mysql_statement)
+        r',\s*FOREIGN KEY\s*\([^)]+\)\s*REFERENCES\s*[^)]+\)', '', mysql_statement, flags=re.IGNORECASE)
 
     # Remove any remaining SQLite-specific constraints
     mysql_statement = re.sub(
-        r'CONSTRAINT .*? (UNIQUE|PRIMARY KEY) \(.*?\)', '', mysql_statement)
+        r'CONSTRAINT .*? (UNIQUE|PRIMARY KEY) \(.*?\)', '', mysql_statement, flags=re.IGNORECASE)
 
     # Ensure there's a space before the opening parenthesis
     mysql_statement = re.sub(r'`\(', '` (', mysql_statement)
 
-    return mysql_statement.strip()
+    return mysql_statement.strip(), foreign_keys
 
 
 def get_foreign_keys(sqlite_conn, table_name):
@@ -98,7 +105,7 @@ def get_foreign_keys(sqlite_conn, table_name):
 
 def create_mysql_schema(mysql_conn, sqlite_conn, tables):
     cursor = mysql_conn.cursor()
-    foreign_keys = []
+    foreign_keys_info = {}
 
     for table_name, create_statement in tables:
         print(f"\nProcessing table: {table_name}")
@@ -106,7 +113,7 @@ def create_mysql_schema(mysql_conn, sqlite_conn, tables):
         print(create_statement)
         print()
 
-        mysql_create_statement = convert_create_table_statement(
+        mysql_create_statement, foreign_keys = convert_create_table_statement(
             create_statement)
         print("Converted MySQL statement:")
         print(mysql_create_statement)
@@ -117,9 +124,8 @@ def create_mysql_schema(mysql_conn, sqlite_conn, tables):
             print(f"Table '{table_name}' created successfully in MySQL")
 
             # Collect foreign key information
-            table_foreign_keys = get_foreign_keys(sqlite_conn, table_name)
-            for fk in table_foreign_keys:
-                foreign_keys.append((table_name, fk))
+            if foreign_keys:
+                foreign_keys_info[table_name] = foreign_keys
         except mysql.connector.Error as e:
             print(f"Error creating table '{table_name}' in MySQL:")
             print(f"Error code: {e.errno}")
@@ -127,6 +133,19 @@ def create_mysql_schema(mysql_conn, sqlite_conn, tables):
             print(f"Problematic SQL: {mysql_create_statement}")
             mysql_conn.rollback()
             return False  # Stop processing on first error
+
+    # Now add the foreign keys
+    for table_name, foreign_keys in foreign_keys_info.items():
+        for fk in foreign_keys:
+            fk_sql = f"ALTER TABLE `{table_name}` ADD {fk}"
+            print(f"Adding foreign key for table '{table_name}': {fk_sql}")
+            try:
+                cursor.execute(fk_sql)
+            except mysql.connector.Error as e:
+                print(f"Error adding foreign key for table "
+                      f"'{table_name}': {e}")
+                mysql_conn.rollback()
+                return False
 
     mysql_conn.commit()
     return True  # All tables created successfully
@@ -159,13 +178,18 @@ def transfer_data(sqlite_conn, mysql_conn, tables):
         if rows:
             placeholders = ', '.join(['%s'] * len(common_columns))
             columns = ', '.join(f'`{col}`' for col in common_columns)
-            insert_query = f"INSERT INTO `{table_name}` ({columns}) VALUES ({placeholders})"
+            insert_query = (
+                f"INSERT INTO `{table_name}` ({columns}) "
+                f"VALUES ({placeholders})"
+            )
 
             try:
                 mysql_cursor.executemany(insert_query, rows)
                 mysql_conn.commit()
                 print(
-                    f"Transferred {len(rows)} rows to table '{table_name}' in MySQL")
+                    f"Transferred {len(rows)} rows to table "
+                    f"'{table_name}' in MySQL"
+                )
             except Error as e:
                 print(f"Error inserting data into '{table_name}': {e}")
                 mysql_conn.rollback()
@@ -192,10 +216,10 @@ def compare_databases(sqlite_conn, mysql_conn, tables):
         print(f"  Row count - SQLite: {sqlite_count}, MySQL: {mysql_count}")
 
         if sqlite_count == mysql_count:
-            sqlite_cursor.execute(
-                f"SELECT {columns_str} FROM {table_name} ORDER BY 1")
-            mysql_cursor.execute(
-                f"SELECT {columns_str} FROM `{table_name}` ORDER BY 1")
+            sqlite_cursor.execute(f"SELECT {columns_str} FROM "
+                                  f" {table_name} ORDER BY 1")
+            mysql_cursor.execute(f"SELECT {columns_str} FROM "
+                                 f"`{table_name}` ORDER BY 1")
 
             sqlite_data = sqlite_cursor.fetchall()
             mysql_data = mysql_cursor.fetchall()
@@ -222,9 +246,9 @@ def main():
 
     if sqlite_conn and mysql_conn:
         tables = get_sqlite_schema(sqlite_conn)
-        create_mysql_schema(mysql_conn, sqlite_conn, tables)
-        transfer_data(sqlite_conn, mysql_conn, tables)
-        compare_databases(sqlite_conn, mysql_conn, tables)
+        if create_mysql_schema(mysql_conn, sqlite_conn, tables):
+            transfer_data(sqlite_conn, mysql_conn, tables)
+            compare_databases(sqlite_conn, mysql_conn, tables)
 
         sqlite_conn.close()
         mysql_conn.close()
