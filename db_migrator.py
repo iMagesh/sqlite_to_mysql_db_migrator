@@ -175,6 +175,37 @@ def transfer_data_with_pandas(sqlite_conn, mysql_conn, tables):
         print(f"Transferred {len(df)} rows to table '{table_name}' in MySQL")
 
 
+def normalize_type(data_type):
+    type_mapping = {
+        'INT': 'int',
+        'INTEGER': 'int',
+        'BIGINT': 'int',
+        'SMALLINT': 'int',
+        'TINYINT': 'int',
+        'FLOAT': 'float',
+        'DOUBLE': 'float',
+        'REAL': 'float',
+        'NUMERIC': 'float',
+        'DECIMAL': 'float',
+        'BOOLEAN': 'tinyint',
+        'TEXT': 'text',
+        'BLOB': 'blob',
+        'DATETIME': 'datetime',
+        'DATE': 'date',
+        'TIME': 'time',
+        'VARCHAR': 'text',
+        'CHAR': 'text',
+        'CLOB': 'text',
+        'NVARCHAR': 'text',
+        'NCHAR': 'text'
+    }
+    normalized = data_type.upper()
+    for key, value in type_mapping.items():
+        if key in normalized:
+            return value
+    return normalized
+
+
 def compare_schemas(sqlite_conn, mysql_conn):
     sqlite_cursor = sqlite_conn.cursor()
     mysql_connection = mysql_conn.connect()
@@ -186,6 +217,12 @@ def compare_schemas(sqlite_conn, mysql_conn):
 
     if sqlite_tables != mysql_tables:
         print("Schema mismatch: Tables in SQLite and MySQL do not match.")
+        missing_in_mysql = sqlite_tables - mysql_tables
+        missing_in_sqlite = mysql_tables - sqlite_tables
+        if missing_in_mysql:
+            print(f"Tables missing in MySQL: {missing_in_mysql}")
+        if missing_in_sqlite:
+            print(f"Tables missing in SQLite: {missing_in_sqlite}")
         return False
 
     for table in sqlite_tables:
@@ -194,11 +231,19 @@ def compare_schemas(sqlite_conn, mysql_conn):
         mysql_schema = mysql_connection.execute(
             text(f"DESCRIBE {table}")).fetchall()
 
-        sqlite_columns = {(col[1], col[2]) for col in sqlite_schema}
-        mysql_columns = {(col[0], col[1]) for col in mysql_schema}
+        sqlite_columns = {(col[1], normalize_type(col[2]))
+                          for col in sqlite_schema}
+        mysql_columns = {(col[0], normalize_type(col[1]))
+                         for col in mysql_schema}
 
         if sqlite_columns != mysql_columns:
             print(f"Schema mismatch: Columns in table '{table}' do not match.")
+            missing_in_mysql = sqlite_columns - mysql_columns
+            missing_in_sqlite = mysql_columns - sqlite_columns
+            if missing_in_mysql:
+                print(f"Columns missing in MySQL: {missing_in_mysql}")
+            if missing_in_sqlite:
+                print(f"Columns missing in SQLite: {missing_in_sqlite}")
             return False
 
     print("Schemas match.")
@@ -214,6 +259,15 @@ def compare_data(sqlite_conn, mysql_conn, tables):
 
         if not sqlite_df.equals(mysql_df):
             print(f"Data mismatch in table '{table_name}'.")
+            sqlite_count = len(sqlite_df)
+            mysql_count = len(mysql_df)
+            print(f"Row count - SQLite: {sqlite_count}, MySQL: {mysql_count}")
+            if sqlite_count != mysql_count:
+                print(f"Row count mismatch in table '{table_name}'.")
+            else:
+                mismatched_rows = sqlite_df.compare(mysql_df)
+                print(f"Mismatched rows in table '{table_name}':")
+                print(mismatched_rows)
             return False
 
     print("Data matches for all tables.")
