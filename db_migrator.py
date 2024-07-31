@@ -16,7 +16,7 @@ def connect_sqlite(db_file):
 def connect_mysql(host, user, password, database):
     try:
         engine = create_engine(
-            f"mysql+pymysql://{user}:{password}@{host}/{database}")
+            f"mysql+pymysql://{user}:{password}@{host}/{database}?charset=utf8mb4")
         return engine
     except Exception as e:
         print(f"Error connecting to MySQL database: {e}")
@@ -30,16 +30,30 @@ def get_sqlite_schema(sqlite_conn):
     return cursor.fetchall()
 
 
+def get_sqlite_indexes(sqlite_conn, table_name):
+    cursor = sqlite_conn.cursor()
+    cursor.execute(f"PRAGMA index_list('{table_name}')")
+    indexes = cursor.fetchall()
+    index_info = {}
+    for index in indexes:
+        index_name = index[1]
+        cursor.execute(f"PRAGMA index_info('{index_name}')")
+        index_columns = [col[2] for col in cursor.fetchall()]
+        index_info[index_name] = index_columns
+    return index_info
+
+
 def sqlite_to_mysql_type(sqlite_type):
     type_mapping = {
-        'INTEGER': 'INT',
+        'INTEGER': 'BIGINT',
         'REAL': 'DOUBLE',
         'TEXT': 'TEXT',
         'BLOB': 'BLOB',
         'BOOLEAN': 'TINYINT(1)',
         'DATETIME': 'DATETIME',
         'DATE': 'DATE',
-        'TIME': 'TIME'
+        'TIME': 'TIME',
+        'BIGINT': 'BIGINT'
     }
     for sqlite, mysql in type_mapping.items():
         if sqlite in sqlite_type.upper():
@@ -47,7 +61,38 @@ def sqlite_to_mysql_type(sqlite_type):
     return sqlite_type
 
 
-def convert_create_table_statement(sqlite_statement):
+def normalize_type(data_type):
+    type_mapping = {
+        'INT': 'BIGINT',
+        'INTEGER': 'BIGINT',
+        'BIGINT': 'BIGINT',
+        'SMALLINT': 'INT',
+        'TINYINT': 'INT',
+        'FLOAT': 'DOUBLE',
+        'DOUBLE': 'DOUBLE',
+        'REAL': 'DOUBLE',
+        'NUMERIC': 'DOUBLE',
+        'DECIMAL': 'DOUBLE',
+        'BOOLEAN': 'TINYINT(1)',
+        'TEXT': 'TEXT',
+        'BLOB': 'BLOB',
+        'DATETIME': 'DATETIME',
+        'DATE': 'DATE',
+        'TIME': 'TIME',
+        'VARCHAR': 'TEXT',
+        'CHAR': 'TEXT',
+        'CLOB': 'TEXT',
+        'NVARCHAR': 'TEXT',
+        'NCHAR': 'TEXT'
+    }
+    normalized = data_type.upper()
+    for key, value in type_mapping.items():
+        if key in normalized:
+            return value
+    return normalized
+
+
+def convert_create_table_statement(sqlite_statement, foreign_key_data_types):
     mysql_statement = re.sub(
         r'CREATE TABLE', 'CREATE TABLE ', sqlite_statement, flags=re.IGNORECASE)
     mysql_statement = re.sub(r'\s*AUTOINCREMENT\s*', r' AUTO_INCREMENT ',
@@ -55,7 +100,8 @@ def convert_create_table_statement(sqlite_statement):
 
     def replace_type(match):
         column_name = match.group(1)
-        data_type = sqlite_to_mysql_type(match.group(2))
+        sqlite_data_type = match.group(2)
+        data_type = sqlite_to_mysql_type(sqlite_data_type)
         constraints = match.group(3) or ''
 
         if 'not null' in constraints.lower():
@@ -64,6 +110,10 @@ def convert_create_table_statement(sqlite_statement):
 
         if 'primary key' in constraints.lower():
             constraints = constraints.replace('primary key', 'PRIMARY KEY ')
+
+        # Ensure foreign key columns have the correct data type
+        if column_name in foreign_key_data_types:
+            data_type = foreign_key_data_types[column_name]
 
         return f"{column_name} {data_type} {constraints}"
 
@@ -84,6 +134,9 @@ def convert_create_table_statement(sqlite_statement):
         r'CONSTRAINT .*? (UNIQUE|PRIMARY KEY) \(.*?\)', '', mysql_statement, flags=re.IGNORECASE)
     mysql_statement = re.sub(r'`\(', '` (', mysql_statement)
 
+    # Set default character set and collation for the table
+    mysql_statement += ' DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+
     return mysql_statement.strip(), foreign_keys
 
 
@@ -91,6 +144,15 @@ def get_foreign_keys(sqlite_conn, table_name):
     cursor = sqlite_conn.cursor()
     cursor.execute(f"PRAGMA foreign_key_list('{table_name}')")
     return cursor.fetchall()
+
+
+def get_sqlite_column_type(sqlite_conn, table_name, column_name):
+    cursor = sqlite_conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    for row in cursor.fetchall():
+        if row[1] == column_name:
+            return row[2]
+    return None
 
 
 def sort_tables_by_dependency(tables, sqlite_conn):
@@ -118,7 +180,7 @@ def sort_tables_by_dependency(tables, sqlite_conn):
     return [(table, table_dict[table]) for table in sorted_tables]
 
 
-def create_mysql_schema(mysql_conn, sqlite_conn, tables):
+def create_mysql_schema_without_foreign_keys(mysql_conn, sqlite_conn, tables):
     connection = mysql_conn.connect()
     foreign_keys_info = {}
 
@@ -131,12 +193,13 @@ def create_mysql_schema(mysql_conn, sqlite_conn, tables):
         print()
 
         mysql_create_statement, foreign_keys = convert_create_table_statement(
-            create_statement)
+            create_statement, {})
         print("Converted MySQL statement:")
         print(mysql_create_statement)
         print()
 
         try:
+            print(f"Executing SQL: {mysql_create_statement}")
             connection.execute(text(mysql_create_statement))
             print(f"Table '{table_name}' created successfully in MySQL")
 
@@ -149,15 +212,72 @@ def create_mysql_schema(mysql_conn, sqlite_conn, tables):
             connection.rollback()
             return False
 
+    # Create indexes
+    for table_name, _ in tables:
+        indexes = get_sqlite_indexes(sqlite_conn, table_name)
+        for index_name, index_columns in indexes.items():
+            index_columns_str = ", ".join(
+                [f"`{col}`" for col in index_columns])
+            create_index_sql = f"CREATE INDEX `{index_name}` ON "
+            f"`{table_name}` ({index_columns_str})"
+            print(f"Creating index for table "
+                  f"'{table_name}': {create_index_sql}")
+            try:
+                connection.execute(text(create_index_sql))
+            except Exception as e:
+                print(f"Error creating index "
+                      f"'{index_name}' for table '{table_name}': {e}")
+                print(f"Problematic SQL: {create_index_sql}")
+                connection.rollback()
+                return False
+
+    connection.commit()
+    connection.close()
+    return foreign_keys_info
+
+
+def match_foreign_key_data_types(mysql_conn, foreign_keys_info):
+    connection = mysql_conn.connect()
+
+    for table_name, foreign_keys in foreign_keys_info.items():
+        for fk in foreign_keys:
+            referenced_table = re.search(
+                r'REFERENCES\s+`?(\w+)`?', fk).group(1)
+            fk_column = re.search(r'FOREIGN KEY\s+\(`?(\w+)`?\)', fk).group(1)
+            ref_column = re.search(
+                r'REFERENCES\s+`?\w+`?\s+\(`?(\w+)`?\)', fk).group(1)
+
+            # Get the data type of the referenced column from MySQL
+            ref_column_type = connection.execute(
+                text(f"DESCRIBE {referenced_table}")).fetchall()
+            ref_column_type_dict = {col[0]: col[1] for col in ref_column_type}
+            ref_column_type_mysql = ref_column_type_dict[ref_column]
+
+            # Alter the foreign key column type to match the referenced column type
+            alter_fk_column_sql = f"ALTER TABLE `{table_name}` MODIFY "
+            f"`{fk_column}` {ref_column_type_mysql}"
+            print(f"Executing SQL to modify foreign key column type: "
+                  f"{alter_fk_column_sql}")
+            connection.execute(text(alter_fk_column_sql))
+
+    connection.commit()
+    connection.close()
+
+
+def add_foreign_keys(mysql_conn, foreign_keys_info):
+    connection = mysql_conn.connect()
+
     for table_name, foreign_keys in foreign_keys_info.items():
         for fk in foreign_keys:
             fk_sql = f"ALTER TABLE `{table_name}` ADD {fk}"
             print(f"Adding foreign key for table '{table_name}': {fk_sql}")
             try:
+                print(f"Executing SQL: {fk_sql}")
                 connection.execute(text(fk_sql))
             except Exception as e:
                 print(f"Error adding foreign key for table "
                       f"'{table_name}': {e}")
+                print(f"Problematic SQL: {fk_sql}")
                 connection.rollback()
                 return False
 
@@ -173,37 +293,6 @@ def transfer_data_with_pandas(sqlite_conn, mysql_conn, tables):
         df.to_sql(name=table_name, con=engine,
                   if_exists='append', index=False, method='multi')
         print(f"Transferred {len(df)} rows to table '{table_name}' in MySQL")
-
-
-def normalize_type(data_type):
-    type_mapping = {
-        'INT': 'int',
-        'INTEGER': 'int',
-        'BIGINT': 'int',
-        'SMALLINT': 'int',
-        'TINYINT': 'int',
-        'FLOAT': 'float',
-        'DOUBLE': 'float',
-        'REAL': 'float',
-        'NUMERIC': 'float',
-        'DECIMAL': 'float',
-        'BOOLEAN': 'tinyint',
-        'TEXT': 'text',
-        'BLOB': 'blob',
-        'DATETIME': 'datetime',
-        'DATE': 'date',
-        'TIME': 'time',
-        'VARCHAR': 'text',
-        'CHAR': 'text',
-        'CLOB': 'text',
-        'NVARCHAR': 'text',
-        'NCHAR': 'text'
-    }
-    normalized = data_type.upper()
-    for key, value in type_mapping.items():
-        if key in normalized:
-            return value
-    return normalized
 
 
 def compare_schemas(sqlite_conn, mysql_conn):
@@ -275,7 +364,7 @@ def compare_data(sqlite_conn, mysql_conn, tables):
 
 
 def main():
-    sqlite_db = "./dev-strapi-database-march-292024.db"
+    sqlite_db = "./data-20240703190001.db"
     mysql_host = "localhost"
     mysql_user = "strapi"
     mysql_password = "strapi"
@@ -287,14 +376,17 @@ def main():
 
     if sqlite_conn and mysql_conn:
         tables = get_sqlite_schema(sqlite_conn)
-        if create_mysql_schema(mysql_conn, sqlite_conn, tables):
+        foreign_keys_info = create_mysql_schema_without_foreign_keys(
+            mysql_conn, sqlite_conn, tables)
+        match_foreign_key_data_types(mysql_conn, foreign_keys_info)
+        if add_foreign_keys(mysql_conn, foreign_keys_info):
             transfer_data_with_pandas(sqlite_conn, mysql_conn, tables)
             if compare_schemas(sqlite_conn, mysql_conn) and compare_data(sqlite_conn, mysql_conn, tables):
                 print("Migration successful and validated.")
             else:
                 print("Migration validation failed.")
         else:
-            print("Schema creation failed.")
+            print("Adding foreign keys failed.")
 
         sqlite_conn.close()
     else:
