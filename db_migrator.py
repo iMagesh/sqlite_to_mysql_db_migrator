@@ -556,14 +556,14 @@ def main():
             #     mysql_conn, sqlite_conn, foreign_keys_info)
             # logger.info("Finished updating column types.")
 
+            # Step 4: Transfer data
+            transfer_data_with_pandas(sqlite_conn, mysql_conn, [
+                                      (table, '') for table in created_tables])
+            logger.info("Finished transferring data.")
+
             # Step 3: Add foreign keys for all tables
             add_foreign_keys(mysql_conn, foreign_keys_info)
             logger.info("Finished adding foreign keys.")
-
-            # # Step 4: Transfer data
-            # transfer_data_with_pandas(sqlite_conn, mysql_conn, [
-            #                           (table, '') for table in created_tables])
-            # logger.info("Finished transferring data.")
 
             # # Step 5: Validate migration
             # if compare_schemas(sqlite_conn, mysql_conn) and compare_data(sqlite_conn, mysql_conn, [(table, '') for table in created_tables]):
