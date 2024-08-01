@@ -379,29 +379,40 @@ def add_foreign_keys(mysql_conn, foreign_keys_info):
     try:
         for table_name, foreign_keys in foreign_keys_info.items():
             for fk in foreign_keys:
-                fk_column = fk[3]
-                referenced_table = fk[2]
-                referenced_column = fk[4]
-                on_delete = fk[5]
-                on_update = fk[6]
+                # Parse the foreign key constraint
+                match = re.match(
+                    r'CONSTRAINT\s+`?(\w+)`?\s+FOREIGN KEY\s*\(`?(\w+)`?\)\s*REFERENCES\s*`?(\w+)`?\s*\(`?(\w+)`?\)(\s+ON DELETE (\w+(\s+\w+)?)?)?(\s+ON UPDATE (\w+(\s+\w+)?)?)?', fk, re.IGNORECASE)
 
-                fk_sql = f"""
-                ALTER TABLE `{table_name}`
-                ADD CONSTRAINT `fk_{table_name}_{fk_column}`
-                FOREIGN KEY (`{fk_column}`)
-                REFERENCES `{referenced_table}`(`{referenced_column}`)
-                ON DELETE {on_delete} ON UPDATE {on_update}
-                """
-                logger.info(f"""
-                            Adding foreign key for table '{
-                            table_name}': {fk_sql}""")
-                try:
-                    connection.execute(text(fk_sql))
-                except Exception as e:
-                    logger.error(f"""Error adding foreign key for table '{
-                                 table_name}': {e}""")
-                    logger.error(f"Problematic SQL: {fk_sql}")
-                    return False
+                if match:
+                    constraint_name = match.group(1)
+                    fk_column = match.group(2)
+                    referenced_table = match.group(3)
+                    referenced_column = match.group(4)
+                    on_delete = match.group(
+                        6) if match.group(6) else 'RESTRICT'
+                    on_update = match.group(
+                        9) if match.group(9) else 'RESTRICT'
+
+                    fk_sql = f"""
+                    ALTER TABLE `{table_name}`
+                    ADD CONSTRAINT `{constraint_name}`
+                    FOREIGN KEY (`{fk_column}`)
+                    REFERENCES `{referenced_table}`(`{referenced_column}`)
+                    ON DELETE {on_delete} ON UPDATE {on_update}
+                    """
+                    logger.info(f"""Adding foreign key for table '{
+                                table_name}': {fk_sql}""")
+                    try:
+                        connection.execute(text(fk_sql))
+                    except Exception as e:
+                        logger.error(f"""Error adding foreign key for table '{
+                                     table_name}': {e}""")
+                        logger.error(f"Problematic SQL: {fk_sql}")
+                        # Continue with other foreign keys instead of raising an exception
+                        continue
+                else:
+                    logger.warning(
+                        f"Could not parse foreign key constraint: {fk}")
 
         connection.commit()
         return True
