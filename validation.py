@@ -28,7 +28,7 @@ def compare_schemas(sqlite_conn, mysql_conn):
         sqlite_schema = sqlite_cursor.execute(
             f"PRAGMA table_info({table})").fetchall()
         mysql_schema = mysql_connection.execute(
-            text(f"DESCRIBE {table}")).fetchall()
+            text(f"DESCRIBE `{table}`")).fetchall()
 
         sqlite_columns = {(col[1], normalize_type(col[2]))
                           for col in sqlite_schema}
