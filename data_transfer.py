@@ -4,10 +4,38 @@ from sqlalchemy import text
 import re
 
 
+def convert_datetime_format(df):
+    """
+    Convert specified timestamp columns from milliseconds to datetime.
+
+    Parameters:
+    df (pd.DataFrame): DataFrame containing the data.
+    timestamp_columns (list): List of column names to convert from milliseconds to datetime.
+
+    Returns:
+    pd.DataFrame: DataFrame with converted timestamp columns.
+    """
+    # List of columns to convert from milliseconds to datetime
+    timestamp_columns = ['created_at', 'updated_at', 'published_at']
+
+    # Convert the specified columns if they exist in the DataFrame
+    for col in timestamp_columns:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], unit='ms')
+            print(f"Converted {col} to datetime.")
+
+    print("Converted DataFrame:\n", df)
+
+    return df
+
+
 def transfer_data_with_pandas(sqlite_conn, mysql_conn, tables):
     engine = mysql_conn
     for table_name, _ in tables:
         df = pd.read_sql_query(f"SELECT * FROM {table_name}", sqlite_conn)
+
+        df = convert_datetime_format(df)
+
         df.to_sql(name=table_name, con=engine,
                   if_exists='append', index=False, method='multi')
         logger.info("Transferred %d rows to table '%s' in MySQL",
